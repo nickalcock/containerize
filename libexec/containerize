@@ -1,0 +1,87 @@
+#!/bin/bash
+# Containerize some filesystem.
+
+set -e
+
+ROOT="$1"
+INSTANCE="$2"
+shift
+shift
+
+if [[ -z $ROOT ]] || [[ ! -d /trees/$ROOT ]]; then
+    echo "Error: need root name as first arg." >&2
+    exit 1
+fi
+
+if [[ ! -d /trees/$ROOT/.container ]]; then
+    echo "Error: $ROOT is not a container root." >&2
+    exit 1
+fi
+
+if [[ -z $INSTANCE ]] || [[ ! -d /trees/$ROOT/$INSTANCE ]]; then
+    echo "Error: need instance name as second arg." >&2
+    exit 1
+fi
+
+me_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+me_FILE="$(basename $0)"
+cd /
+
+if [[ -f /trees/$ROOT/.container/$INSTANCE.pid ]]; then
+    ARGS="$@"
+    if [[ -z $ARGS ]]; then
+        nsenter -t $(cat /trees/$ROOT/.container/$INSTANCE.pid) -r -m runuser - $SUDO_USER
+    else
+        nsenter -t $(cat /trees/$ROOT/.container/$INSTANCE.pid) -r -m runuser -u $SUDO_USER -- $ARGS
+    fi
+    exit "$?"
+fi
+
+case $1 in
+    --unshared) shift
+                mount --make-rslave /
+                CGROUP=containerize
+                if [[ -x /trees/$ROOT/.container/cgroup-name ]]; then
+                    CGROUP="$(cat /trees/$ROOT/.container/cgroup-name)"
+                fi
+                [[ -x /trees/$ROOT/.container/bind ]] && /trees/$ROOT/.container/bind /trees/$ROOT/$INSTANCE $ROOT $INSTANCE
+                mount --bind /proc /trees/$ROOT/$INSTANCE/proc
+                mount --bind /sys /trees/$ROOT/$INSTANCE/sys
+                mount --rbind /dev /trees/$ROOT/$INSTANCE/dev
+                mount -t tmpfs none /trees/$ROOT/$INSTANCE/tmp
+                ARGS="$@"
+                (echo $BASHPID > /trees/$ROOT/.container/$INSTANCE.pid
+                 mkdir -p /sys/fs/cgroup/$CGROUP/$BASHPID
+                 echo $BASHPID > /sys/fs/cgroup/$CGROUP/$BASHPID/cgroup.procs
+                 if [[ -f /trees/$ROOT/.container/profile ]]; then
+                     PNAME="container-profile-$$"
+                     touch /trees/$ROOT/$INSTANCE/tmp/$PNAME
+                     mount --bind /trees/$ROOT/.container/profile /trees/$ROOT/$INSTANCE/tmp/$PNAME
+                     chroot /trees/$ROOT/$INSTANCE /tmp/$PNAME $ROOT $INSTANCE
+                     umount /trees/$ROOT/$INSTANCE/tmp/$PNAME
+                     rm -f /trees/$ROOT/$INSTANCE/tmp/$PNAME
+                 fi
+                 if [[ -z $ARGS ]]; then
+                     exec chroot /trees/$ROOT/$INSTANCE runuser - $SUDO_USER
+                 else
+                     exec chroot /trees/$ROOT/$INSTANCE runuser -u $SUDO_USER -- $ARGS
+                 fi)
+                [[ -x /trees/$ROOT/.container/stop ]] && /trees/$ROOT/.container/stop /trees/$ROOT/$INSTANCE $(cat /trees/$ROOT/.container/$INSTANCE.pid)
+                sleep 1
+                rmdir /sys/fs/cgroup/$CGROUP/$(cat /trees/$ROOT/.container/$INSTANCE.pid) 2>/dev/null
+                rm -f /trees/$ROOT/.container/$INSTANCE.pid
+                for name in tmp dev sys proc; do
+                    umount -l /trees/$ROOT/$INSTANCE/$name
+                done
+                [[ -x /trees/$ROOT/.container/unbind ]] && /trees/$ROOT/.container/unbind /trees/$ROOT/$INSTANCE
+                exit 0;;
+    *) # Initial entry.
+       UNSHARE_OPTIONS=""
+       if [[ -e /trees/$ROOT/.container/unshare-options ]]; then
+           UNSHARE_OPTIONS="$(cat /trees/$ROOT/.container/unshare-options)"
+       fi
+       exec unshare -m --propagation slave $UNSHARE_OPTIONS -- $me_DIR/$me_FILE "$ROOT" "$INSTANCE" --unshared "$@"
+       exit 0;;
+esac
+
+exit 0

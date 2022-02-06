@@ -1,0 +1,4 @@
+# Suitable users may run the containerizer.
+Cmnd_Alias CONTAINERIZE = /usr/libexec/containerize
+
+CONTAINERERS ALL = (root) NOPASSWD: CONTAINERIZE
